@@ -1,7 +1,7 @@
-# zig-libgc
+# zig-gc
 
 This library implements a Zig allocator that uses the
-[Boehm-Demers-Weiser conservative Garbage Collector (libgc, bdwgc, boehm-gc)](https://github.com/ivmai/bdwgc).
+[Boehm-Demers-Weiser conservative Garbage Collector (libgc, bdwgc, boehm-gc)](https://github.com/bdwgc/bdwgc).
 Values allocated within this allocator do not need to be explicitly
 freed.
 
@@ -16,13 +16,12 @@ want in the garbage collector.
 ```zig
 const std = @import("std");
 const gc = @import("gc");
-const GcAllocator = gc.GcAllocator;
 
 pub fn main() !void {
     var alloc = gc.allocator();
 
     // We'll write to the terminal
-    const stdout = std.io.getStdOut().writer();
+    var stdout = std.fs.File.stdout().writer(&.{});
 
     // Compare the output by enabling/disabling
     // gc.disable();
@@ -35,13 +34,14 @@ pub fn main() !void {
         // This is all really ugly but its not idiomatic Zig code so
         // just take this at face value. We're doing weird stuff here
         // to show that we're collecting garbage.
-        var p = @ptrCast(**u8, try alloc.alloc(*u8, @sizeOf(*u8)));
-        var q = try alloc.alloc(u8, @sizeOf(u8));
-        p.* = @ptrCast(*u8, alloc.resize(q, 2 * @sizeOf(u8)).?);
+        const p: **u8 = @ptrCast(try alloc.alloc(*u8, @sizeOf(*u8)));
+        const q = try alloc.alloc(u8, @sizeOf(u8));
+        p.* = @ptrCast(q);
+        _ = alloc.resize(q, 2 * @sizeOf(u8));
 
         if (i % 100_000 == 0) {
             const heap = gc.getHeapSize();
-            try stdout.print("heap size: {d}\n", .{heap});
+            try stdout.interface.print("heap size: {d}\n", .{heap});
         }
     }
 }

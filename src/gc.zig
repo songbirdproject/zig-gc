@@ -1,23 +1,18 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
-const mem = std.mem;
 const Allocator = std.mem.Allocator;
+const Alignment = std.mem.Alignment;
 
-const gc = @cImport({
-    @cInclude("gc.h");
-});
+const gc = @import("gc");
 
-/// Returns the Allocator used for APIs in Zig
 pub fn allocator() Allocator {
-    // Initialize libgc
-    if (gc.GC_is_init_called() == 0) {
+    if (gc.GC_is_init_called() == 0)
         gc.GC_init();
-    }
 
     return Allocator{
         .ptr = undefined,
-        .vtable = &gc_allocator_vtable,
+        .vtable = &GcAllocator.vtable,
     };
 }
 
@@ -74,45 +69,64 @@ pub fn setFindLeak(v: bool) void {
 // since libgc has a malloc/free-style interface. There are very slight differences
 // due to API differences but overall the same.
 pub const GcAllocator = struct {
+    pub const vtable = Allocator.VTable{
+        .alloc = GcAllocator.alloc,
+        .resize = GcAllocator.resize,
+        .remap = GcAllocator.remap,
+        .free = GcAllocator.free,
+    };
+
     fn alloc(
         _: *anyopaque,
         len: usize,
-        log2_align: u8,
+        alignment: Alignment,
         return_address: usize,
     ) ?[*]u8 {
         _ = return_address;
         assert(len > 0);
-        return alignedAlloc(len, log2_align);
+        return alignedAlloc(len, alignment);
     }
 
     fn resize(
         _: *anyopaque,
         buf: []u8,
-        log2_buf_align: u8,
+        alignment: Alignment,
         new_len: usize,
         return_address: usize,
     ) bool {
-        _ = log2_buf_align;
+        _ = alignment;
         _ = return_address;
-        if (new_len <= buf.len) {
-            return true;
-        }
 
+        if (new_len <= buf.len) return true;
         const full_len = alignedAllocSize(buf.ptr);
-        if (new_len <= full_len) {
-            return true;
-        }
+        if (new_len <= full_len) return true;
 
         return false;
+    }
+
+    fn remap(
+        _: *anyopaque,
+        buf: []u8,
+        alignment: Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        _ = return_address;
+
+        if (new_len <= buf.len) return buf.ptr;
+        const full_len = alignedAllocSize(buf.ptr);
+        if (new_len <= full_len) return buf.ptr;
+
+        return alignedRemap(getHeader(buf.ptr).*, new_len, alignment);
     }
 
     fn free(
         _: *anyopaque,
         buf: []u8,
-        log2_buf_align: u8,
+        alignment: Alignment,
         return_address: usize,
     ) void {
-        _ = log2_buf_align;
+        _ = alignment;
         _ = return_address;
         alignedFree(buf.ptr);
     }
@@ -121,16 +135,31 @@ pub const GcAllocator = struct {
         return @as(*[*]u8, @ptrFromInt(@intFromPtr(ptr) - @sizeOf(usize)));
     }
 
-    fn alignedAlloc(len: usize, log2_align: u8) ?[*]u8 {
-        const alignment = @as(usize, 1) << @as(Allocator.Log2Align, @intCast(log2_align));
+    fn alignedAlloc(len: usize, alignment: Alignment) ?[*]u8 {
+        const _align = alignment.toByteUnits();
 
         // Thin wrapper around regular malloc, overallocate to account for
-        // alignment padding and store the orignal malloc()'ed pointer before
+        // _align padding and store the orignal malloc()'ed pointer before
         // the aligned address.
-        var unaligned_ptr = @as([*]u8, @ptrCast(gc.GC_malloc(len + alignment - 1 + @sizeOf(usize)) orelse return null));
+        const unaligned_ptr = @as([*]u8, @ptrCast(gc.GC_malloc(len + _align - 1 + @sizeOf(usize)) orelse return null));
         const unaligned_addr = @intFromPtr(unaligned_ptr);
-        const aligned_addr = mem.alignForward(usize, unaligned_addr + @sizeOf(usize), alignment);
-        var aligned_ptr = unaligned_ptr + (aligned_addr - unaligned_addr);
+        const aligned_addr = std.mem.alignForward(usize, unaligned_addr + @sizeOf(usize), _align);
+        const aligned_ptr = unaligned_ptr + (aligned_addr - unaligned_addr);
+        getHeader(aligned_ptr).* = unaligned_ptr;
+
+        return aligned_ptr;
+    }
+
+    fn alignedRemap(ptr: [*]u8, len: usize, alignment: Alignment) ?[*]u8 {
+        const _align = alignment.toByteUnits();
+
+        // Thin wrapper around regular realloc, overallocate to account for
+        // _align padding and store the orignal realloc()'ed pointer before
+        // the aligned address.
+        const unaligned_ptr = @as([*]u8, @ptrCast(gc.GC_realloc(@ptrCast(ptr), len + _align - 1 + @sizeOf(usize)) orelse return null));
+        const unaligned_addr = @intFromPtr(unaligned_ptr);
+        const aligned_addr = std.mem.alignForward(usize, unaligned_addr + @sizeOf(usize), _align);
+        const aligned_ptr = unaligned_ptr + (aligned_addr - unaligned_addr);
         getHeader(aligned_ptr).* = unaligned_ptr;
 
         return aligned_ptr;
@@ -146,12 +175,6 @@ pub const GcAllocator = struct {
         const delta = @intFromPtr(ptr) - @intFromPtr(unaligned_ptr);
         return gc.GC_size(unaligned_ptr) - delta;
     }
-};
-
-const gc_allocator_vtable = Allocator.VTable{
-    .alloc = GcAllocator.alloc,
-    .resize = GcAllocator.resize,
-    .free = GcAllocator.free,
 };
 
 test "GcAllocator" {
