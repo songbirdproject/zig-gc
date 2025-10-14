@@ -65,7 +65,7 @@ const GcAllocator = struct {
     }
 };
 
-test allocator {
+test "basic allocation" {
     const alloc = allocator();
 
     try std.heap.testAllocator(alloc);
@@ -114,7 +114,7 @@ pub fn setFindLeak(v: bool) void {
     return gc.GC_set_find_leak(@intFromBool(v));
 }
 
-test getHeapSize {
+test "heap size" {
     // No garbage so should be 0
     try testing.expect(collectLittle() == 0);
 
@@ -135,6 +135,16 @@ pub fn setFinalizeOnDemand(value: bool) void {
 /// Enable or disable Java finalization. See the libgc docs for more details.
 pub fn setJavaFinalization(value: bool) void {
     gc.GC_set_java_finalization(@intFromBool(value));
+}
+
+/// The function type for the finalizer notifier.
+pub const FinalizerNotifier = *const fn () callconv(.c) void;
+
+/// Invoked by the collector when there are objects to be finalized.
+/// Invoked at most once per collection cycle. Never invoked unless
+/// finalization is set to run on demand.
+pub fn setFinalizerNotifier(notifier: FinalizerNotifier) void {
+    gc.GC_set_finalizer_notifier(notifier);
 }
 
 /// The function type for finalizers.
@@ -179,33 +189,48 @@ pub fn shouldInvokeFinalizers() bool {
     return gc.GC_should_invoke_finalizers() > 0;
 }
 
+/// Set maximum amount of finalizers to run during a single
+/// invokeFinalizers() call. Zero means no limit.
+pub fn setInterruptFinalizers(n: usize) void {
+    return gc.GC_set_interrupt_finalizers(n);
+}
+
 /// Run finalizers for all objects that are ready to be finalized.
 /// Returns the number of finalizers that were run.
 pub fn invokeFinalizers() usize {
     return @intCast(gc.GC_invoke_finalizers());
 }
 
-test "finalizers" {
-    var value: usize = 1;
+test "finalizer basics" {
+    const FinalizerTest = struct {
+        var value: usize = 2;
 
-    const Object = struct {
-        value: usize,
+        fn notifier() callconv(.c) void {
+            // decrement the value to show that the notifier ran
+            // this should run before the finalizer
+            // finalizer will do the same, we'll reach 0
+            value -= 1;
+        }
 
         fn finalizer(obj: ?*anyopaque, data: ?*anyopaque) callconv(.c) void {
             _ = obj;
             // our data pointer was set to a pointer to `value`
-            // set the value to 0 to show that the finalizer ran
-            @as(*volatile usize, @ptrCast(@alignCast(data))).* = 0;
+            // decrement the value to show that the finalizer ran
+            @as(*volatile usize, @ptrCast(@alignCast(data))).* -= 1;
         }
     };
 
-    // require us to run invokeFinalizers manually
-    // allows us to test shouldInvokeFinalizers too
+    // on-demand finalization lets us test:
+    // - invokeFinalizers
+    // - shouldInvokeFinalizers
+    // - setFinalizerNotifier
     setFinalizeOnDemand(true);
 
-    const obj = try allocator().create(Object);
-    obj.value = 123456789;
-    registerFinalizer(obj, &Object.finalizer, @ptrCast(&value), null, null, .normal);
+    // set a finalizer notifier to modify value
+    setFinalizerNotifier(&FinalizerTest.notifier);
+    // create an object and register the finalizer on it to modify value
+    const obj = try allocator().create(u64);
+    registerFinalizer(obj, &FinalizerTest.finalizer, @ptrCast(&FinalizerTest.value), null, null, .normal);
     // destroy the object so bdwgc knows it's unreachable
     allocator().destroy(obj);
 
@@ -213,5 +238,5 @@ test "finalizers" {
     collect(); // required for it to be picked up
     try std.testing.expect(shouldInvokeFinalizers());
     try std.testing.expectEqual(1, invokeFinalizers());
-    try std.testing.expectEqual(0, value);
+    try std.testing.expectEqual(0, FinalizerTest.value);
 }
