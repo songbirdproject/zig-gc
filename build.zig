@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
 
     const module = blk: {
         const module = b.addModule("gc", .{
-            .root_source_file = b.path("src/gc.zig"),
+            .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
