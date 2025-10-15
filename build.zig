@@ -1,11 +1,12 @@
-// Code borrowed from https://github.com/johan0A/gc.zig/blob/main/build.zig
-// Originally written by Johan Alley, licensed under the MIT license.
-
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // from bdwgc's build script; no threading on emscripten/wasi
+    const default_enable_threads = !target.result.cpu.arch.isWasm();
+    const threading = b.option(bool, "threading", "Enable multi-threading") orelse default_enable_threads;
 
     const module = blk: {
         const module = b.addModule("gc", .{
@@ -18,6 +19,11 @@ pub fn build(b: *std.Build) void {
         const bdwgc = b.dependency("bdwgc", .{
             .target = target,
             .optimize = optimize,
+            .enable_threads = threading,
+            // disable some unneeded features
+            .enable_gcj_support = false,
+            .enable_atomic_uncollectable = false,
+            .enable_disclaim = false,
         });
         const artifact = bdwgc.artifact("gc");
         module.linkLibrary(artifact);
@@ -27,7 +33,14 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         });
+
+        const options = b.addOptions();
+        options.addOption(bool, "threading", threading);
+        translated.defineCMacro("GC_THREADS", null);
+        const options_module = options.createModule();
+
         module.addImport("gc", translated.createModule());
+        module.addImport("options", options_module);
 
         break :blk module;
     };

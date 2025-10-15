@@ -24,7 +24,7 @@ pub fn main() !void {
         _ = alloc.resize(q, 2 * @sizeOf(u8));
 
         if (i % 100_000 == 0) {
-            const heap = gc.getHeapSize();
+            const heap = gc.getStatistics().heapSize();
             try stdout.interface.print("heap size: {d}\n", .{heap});
         }
     }
