@@ -86,36 +86,36 @@ test "basic allocation" {
 // BASIC HELPER FUNCTIONS
 
 /// Enable or disable interior pointers.
-/// If used, this must be called before the first allocator() call.
-pub fn setAllInteriorPointers(enable_interior_pointers: bool) void {
-    gc.GC_set_all_interior_pointers(@intFromBool(enable_interior_pointers));
+/// If used, this must be called before the first allocator() call.H
+pub inline fn setAllInteriorPointers(value: bool) void {
+    gc.GC_set_all_interior_pointers(@intFromBool(value));
 }
 
 /// Disable garbage collection.
-pub fn disable() void {
+pub inline fn disable() void {
     gc.GC_disable();
 }
 
 /// Enables garbage collection. GC is enabled by default so this is
 /// only useful if you called disable earlier.
-pub fn enable() void {
+pub inline fn enable() void {
     gc.GC_enable();
 }
 
 // Performs a full, stop-the-world garbage collection. With leak detection
 // enabled this will output any leaks as well.
-pub fn collect() void {
+pub inline fn collect() void {
     gc.GC_gcollect();
 }
 
 /// Perform some garbage collection. Returns zero when work is done.
-pub fn collectLittle() u8 {
-    return @as(u8, @intCast(gc.GC_collect_a_little()));
+pub inline fn collectLittle() usize {
+    return @intCast(gc.GC_collect_a_little());
 }
 
 /// Enables leak-finding mode. See the libgc docs for more details.
-pub fn setFindLeak(v: bool) void {
-    return gc.GC_set_find_leak(@intFromBool(v));
+pub inline fn setFindLeak(value: bool) void {
+    return gc.GC_set_find_leak(@intFromBool(value));
 }
 
 // STATISTICS
@@ -140,6 +140,10 @@ pub const Statistics = extern struct {
 
     pub inline fn freeBytes(self: Statistics) usize {
         return self.free_bytes_full - self.unmapped_bytes;
+    }
+
+    pub inline fn markers(self: Statistics) usize {
+        return self.markers_m1 + 1;
     }
 };
 
@@ -242,12 +246,12 @@ test "collection events" {
 
 /// If enabled, finalizers will only be run in response to an explicit
 /// invokeFinalizers() invocation. Disabled by default.
-pub fn setFinalizeOnDemand(value: bool) void {
+pub inline fn setFinalizeOnDemand(value: bool) void {
     gc.GC_set_finalize_on_demand(@intFromBool(value));
 }
 
 /// Enable or disable Java finalization. See the libgc docs for more details.
-pub fn setJavaFinalization(value: bool) void {
+pub inline fn setJavaFinalization(value: bool) void {
     gc.GC_set_java_finalization(@intFromBool(value));
 }
 
@@ -264,19 +268,24 @@ pub fn setFinalizerNotifier(callback: ?fn () void) void {
     gc.GC_set_finalizer_notifier(&wrapper.wrapped);
 }
 
-/// The function type for finalizers.
-/// Data is provided when registered and can be used to determine object type.
+/// The function type for finalizers. Data is provided when registered.
 pub const Finalizer = fn (obj: *anyopaque, data: ?*anyopaque) void;
 
 pub const FinalizerMode = enum {
-    /// Perform finalization in the normal order.
+    /// If object A points to object B, and both have finalizers,
+    /// the finalizer for A will run before the finalizer for B.
     normal,
-    /// Ignore pointers from a finalizable object to itself (self-cycles).
+    /// Ignore pointers from a finalizable object to itself.
+    /// Prevents objects from being missed by the collector
+    /// if they're only kept alive by self-references.
     ignore_self,
-    /// Ignore all cycles.
+    /// No promises of finalization order are made.
+    /// This is faster, and more suitable for objects
+    /// which do not reference other collectible objects.
     no_order,
-    /// Perform finalization when the object is known to be truly unreachable,
-    /// even from other finalizable objects. Only works with Java finalization.
+    /// By finalization time, the object is considered
+    /// truly unreachable, and will be deallocated after
+    /// finalization. The object cannot be resurrected.
     @"unreachable",
 };
 
@@ -306,25 +315,33 @@ pub fn registerFinalizer(
 }
 
 /// Returns true if invokeFinalizers() has something to do.
-pub fn shouldInvokeFinalizers() bool {
+pub inline fn shouldInvokeFinalizers() bool {
     return gc.GC_should_invoke_finalizers() > 0;
 }
 
 /// Set maximum amount of finalizers to run during a single
 /// invokeFinalizers() invocation. Zero means no limit.
-pub fn setInterruptFinalizers(n: usize) void {
+pub inline fn setInterruptFinalizers(n: usize) void {
     return gc.GC_set_interrupt_finalizers(n);
 }
 
 /// Run finalizers for all objects that are ready to be finalized.
 /// Returns the number of finalizers that were run.
-pub fn invokeFinalizers() usize {
+pub inline fn invokeFinalizers() usize {
     return @intCast(gc.GC_invoke_finalizers());
 }
 
 test "finalizer basics" {
     const FinalizerTest = struct {
-        var value: usize = 2;
+        var value: isize = 2;
+
+        fn create() !void {
+            const obj = try allocator().create(u64);
+            // register the finalizer on the object to modify value
+            registerFinalizer(obj, finalizer, @ptrCast(&value), .normal);
+            // destroy the object so bdwgc knows it's unreachable
+            allocator().destroy(obj);
+        }
 
         fn notifier() void {
             // decrement the value to show that the notifier ran
@@ -337,7 +354,7 @@ test "finalizer basics" {
             _ = obj;
             // our data pointer was set to a pointer to `value`
             // decrement the value to show that the finalizer ran
-            @as(*volatile usize, @ptrCast(@alignCast(data))).* -= 1;
+            @as(*volatile isize, @ptrCast(@alignCast(data))).* -= 1;
         }
     };
 
@@ -351,14 +368,10 @@ test "finalizer basics" {
     setFinalizerNotifier(FinalizerTest.notifier);
     // remove the notifier once we're done
     defer setFinalizerNotifier(null);
-    // create an object and register the finalizer on it to modify value
-    const obj = try allocator().create(u64);
-    registerFinalizer(obj, FinalizerTest.finalizer, @ptrCast(&FinalizerTest.value), .normal);
-    // destroy the object so bdwgc knows it's unreachable
-    allocator().destroy(obj);
+
+    try FinalizerTest.create();
 
     collect();
-    collect(); // required for it to be picked up
     try std.testing.expect(shouldInvokeFinalizers());
     try std.testing.expectEqual(1, invokeFinalizers());
     try std.testing.expectEqual(0, FinalizerTest.value);

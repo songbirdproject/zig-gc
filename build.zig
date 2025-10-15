@@ -20,7 +20,8 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .enable_threads = threading,
-            // disable some unneeded features
+            // disable unused features
+            .build_cord = false,
             .enable_gcj_support = false,
             .enable_atomic_uncollectable = false,
             .enable_disclaim = false,
